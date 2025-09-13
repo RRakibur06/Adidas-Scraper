@@ -9,7 +9,31 @@ import urllib.parse
 # The URL you are actually targeting
 url = 'https://www.adidas.ca/en/men-outlet'
 
-def extract_product_details(card):
+def extract_product_sizes(page):
+    """Extract available sizes from product detail page."""
+    sizes = []
+    try:
+        # Wait for the size selector to load
+        size_selector = page.wait_for_selector('div[data-auto-id="size-selector"]', timeout=10000)
+        
+        if size_selector:
+            # Get all size buttons
+            size_buttons = page.query_selector_all('div[data-auto-id="size-selector"] button[role="radio"]')
+            
+            for button in size_buttons:
+                # Get the size text from the button
+                size_text = button.inner_text().strip()
+                if size_text:
+                    sizes.append(size_text)
+        
+    except TimeoutError:
+        print("Size selector not found or timed out")
+    except Exception as e:
+        print(f"Error extracting sizes: {str(e)}")
+    
+    return sizes
+
+def extract_product_details(card, page_context):
     """Extract details from a single product card."""
     # Extract the title
     title_tag = card.select_one('p[data-testid="product-card-title"]')
@@ -43,12 +67,48 @@ def extract_product_details(card):
     img_tag = card.select_one('img[data-testid="product-card-primary-image"]')
     image_url = img_tag.get('src') if img_tag else None
 
+    # Extract the product description link
+    description_link_tag = card.select_one('a[data-testid="product-card-description-link"]')
+    description_link = None
+    product_sizes = []
+    
+    if description_link_tag:
+        description_link = description_link_tag.get('href')
+        if description_link:
+            # Make it absolute URL if it's relative
+            if description_link.startswith('/'):
+                description_link = f"https://www.adidas.ca{description_link}"
+            
+            # Now scrape the product sizes from the detail page
+            print(f"Scraping sizes for: {title}")
+            try:
+                # Create a new page for product detail
+                detail_page = page_context.new_page()
+                detail_page.goto(description_link, wait_until="domcontentloaded")
+                
+                # Extract sizes
+                product_sizes = extract_product_sizes(detail_page)
+                print(f"Found {len(product_sizes)} sizes: {product_sizes}")
+                
+                # Close the detail page
+                detail_page.close()
+                
+                # Add a small delay to avoid overwhelming the server
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"Error scraping product detail page for {title}: {str(e)}")
+                if 'detail_page' in locals():
+                    detail_page.close()
+
     return {
         "title": title,
         "original_price": original_price,
         "main_price": main_price,
         "discount_percentage": discount,
-        "image_url": image_url
+        "image_url": image_url,
+        "description_link": description_link,
+        "available_sizes": product_sizes
     }
 
 def save_to_json(products):
@@ -59,6 +119,7 @@ def save_to_json(products):
     data = {
         "scraped_at": datetime.now().isoformat(),
         "source": url,
+        "total_products": len(products),
         "products": products
     }
     
@@ -105,7 +166,7 @@ def get_next_page_url(page):
     else:
         return f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}?start={next_start}"
 
-def scrape_page(page):
+def scrape_page(page, context):
     """Scrape a single page of products."""
     # Add wait for pagination element
     print("Waiting for page content to load...")
@@ -141,10 +202,10 @@ def scrape_page(page):
     soup = BeautifulSoup(html_content, 'html.parser')
     product_cards = soup.select('article[data-testid="plp-product-card"]')
     
-    return [extract_product_details(card) for card in product_cards]
+    return [extract_product_details(card, context) for card in product_cards]
 
 def main():
-    print("Starting scraper tailored for the target site...")
+    print("Starting enhanced scraper for Adidas with product details and sizes...")
     all_products = []
     current_page = 1
     
@@ -164,22 +225,23 @@ def main():
 
         try:
             while current_url:
-                print(f"\nProcessing page {current_page}...")
+                print(f"\n=== Processing page {current_page} ===")
                 page.goto(current_url, wait_until="domcontentloaded")
                 
                 # Scrape current page
-                page_products = scrape_page(page)
+                page_products = scrape_page(page, context)
                 all_products.extend(page_products)
                 print(f"Found {len(page_products)} products on page {current_page}")
                 
                 # Check for next page
-                next_url = get_next_page_url(page)
+                # next_url = get_next_page_url(page)
+                next_url = None
                 if next_url:
                     current_url = urllib.parse.urljoin(url, next_url)
                     current_page += 1
                     print(f"Found next page: {current_url}")
                     # Add small delay between pages
-                    time.sleep(2)
+                    time.sleep(3)
                 else:
                     current_url = None
                     print("No more pages found")
@@ -196,12 +258,19 @@ def main():
 
         # Save all products if any were collected
         if all_products:
-            print(f"\nTotal products collected: {len(all_products)}")
+            print(f"\n=== SCRAPING COMPLETE ===")
+            print(f"Total products collected: {len(all_products)}")
+            
+            # Count products with sizes
+            products_with_sizes = [p for p in all_products if p.get('available_sizes')]
+            print(f"Products with sizes collected: {len(products_with_sizes)}")
+            
             save_to_json(all_products)
             
             # Print sample of results
             print("\nSample of extracted products:")
-            for product in all_products[:3]:
+            for i, product in enumerate(all_products[:2]):
+                print(f"\n--- Product {i+1} ---")
                 print(json.dumps(product, indent=2))
 
 if __name__ == "__main__":
